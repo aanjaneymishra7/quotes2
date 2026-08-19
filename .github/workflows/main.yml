@@ -1,44 +1,31 @@
-name: Build Android APK
+name: Build Android APK (fast)
 
-# Builds the APK on GitHub's own Linux servers, since Buildozer (the tool
-# that packages this into an .apk) does not run on Windows. Push to `main`
-# or trigger manually, then download the APK from this run's "Artifacts".
+# More robust, faster Buildozer workflow.
+# Improvements:
+# - Installs the common system packages Buildozer/Android toolchain needs
+# - Caches pip (via setup-python) and ~/.buildozer / ./.buildozer
+# - Captures detailed build logs and uploads them on failure for easier debugging
+# - Retries the build up to 2 times before failing (helps transient network/Sdk issues)
+
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch: {}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+    timeout-minutes: 180
 
-      - name: Set up Python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python (with pip cache)
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+          cache: 'pip'
 
-      - name: Set up Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            git zip unzip autoconf libtool pkg-config \
-            zlib1g-dev libncurses-dev cmake libffi-dev libssl-dev \
-            libltdl-dev build-essential
-
-      - name: Install buildozer + cython
-        run: |
-          pip install --upgrade pip
-          pip install buildozer "cython<3.0"
-
-      - name: Cache Buildozer global directory (Android SDK/NDK downloads)
+      - name: Cache Buildozer global directory (SDK/NDK downloads)
         uses: actions/cache@v4
         with:
           path: ~/.buildozer
@@ -48,17 +35,67 @@ jobs:
       - name: Cache Buildozer project build directory
         uses: actions/cache@v4
         with:
-          path: .buildozer
+          path: ./.buildozer
           key: buildozer-local-${{ hashFiles('buildozer.spec') }}
           restore-keys: buildozer-local-
 
-      - name: Build debug APK
+      - name: Install system dependencies
         run: |
-          yes | buildozer android debug
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip autoconf libtool pkg-config zlib1g-dev libncurses-dev cmake \
+            libffi-dev libssl-dev libltdl-dev build-essential openjdk-17-jdk-headless
+
+      - name: Install buildozer and support packages
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install buildozer "cython<3.0"
+
+      - name: Show buildozer version and environment
+        run: |
+          buildozer --version || true
+          python -V
+          java -version || true
+
+      - name: Build debug APK (with retries, capture logs)
+        id: build
+        run: |
+          set -o pipefail
+          mkdir -p build_logs
+          ATTEMPTS=2
+          for i in $(seq 1 $ATTEMPTS); do
+            echo "Build attempt $i"
+            # make buildozer verbose and capture stdout/stderr
+            (yes | buildozer -v android debug) 2>&1 | tee build_logs/buildozer_attempt_${i}.log && break
+            echo "Attempt $i failed"
+            if [ "$i" -lt "$ATTEMPTS" ]; then
+              echo "Retrying after short sleep..."
+              sleep 15
+            fi
+          done
+
+          # If APK not created, print last logs and exit non-zero so the job is marked failed
+          if compgen -G "bin/*.apk" > /dev/null; then
+            echo "APK built successfully"
+          else
+            echo "No APK produced. Showing last 200 lines of last log:"
+            tail -n 200 build_logs/buildozer_attempt_${ATTEMPTS}.log || true
+            exit 1
+          fi
+        continue-on-error: false
 
       - name: Upload APK
+        if: success()
         uses: actions/upload-artifact@v4
         with:
           name: quote-of-the-day-apk
           path: bin/*.apk
           if-no-files-found: error
+
+      - name: Upload build logs (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: build_logs/*.log
+          if-no-files-found: ignore
