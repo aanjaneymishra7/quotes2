@@ -1,0 +1,7 @@
+# For running/testing the app on your desktop (Windows/Mac/Linux) before building the APK.
+# Buildozer does NOT read this file -- its own dependency list lives in buildozer.spec's
+# `requirements =` line, so if you add a package the app needs, add it in both places.
+kivy==2.3.1
+kivymd==1.2.0
+anthropic>=0.39.0
+pytest>=8.0.0
